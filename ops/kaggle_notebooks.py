@@ -382,7 +382,7 @@ def lm_eval_run(model_name, limit=100):
     acc = re.findall(r"acc_norm\s*\|[^|]*\|\s*([0-9.]+)", text); return acc[0] if acc else text[-600:]
 for label, model in (("fp16 original", "Qwen/Qwen3-0.6B"), ("W4A16 quantised", OUT)):
     MODEL = model
-    proc, ready_s = serve(["--max-model-len", "4096"]); print(f"{label}: ready after {ready_s} s")
+    proc, ready_s = serve(["--max-model-len", "4096", "--gpu-memory-utilization", "0.8"]); print(f"{label}: ready after {ready_s} s")   # the notebook process keeps about 2 GiB after quantising, so the server asks for less
     print("  " + log_lines("/kaggle/working/serve.log", {"q": r"quantization=[a-z0-9_]+"}).get("q", "quantization=none"))
     print(f"  hellaswag acc_norm {lm_eval_run(model)}")
     print("  " + row("1 at a time, 1,024 in", bench_quiet(rate="inf", num_prompts=16, input_len=1024, max_concurrency=1, model=model)))
