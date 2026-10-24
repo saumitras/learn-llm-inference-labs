@@ -28,3 +28,27 @@ W4A16 quantised: serve, score, measure
 The weights went to 36 percent of their size and the batch-1 step to 61 percent; the score on 100 HellaSwag
 examples moved by one, inside the ±5 point error of so small a sample; the first token got 6 ms slower, which is
 the cost of unpacking 4-bit weights to 16 bits during the arithmetic-bound prefill.
+
+## Expected output, Kaggle T4 ×2 (captured 25 October 2026, vLLM 0.32.0, fp16)
+
+```
+1. Quantisation
+GPTQ W4A16 on Qwen/Qwen3-0.6B with 128 wikitext samples: 23 s on a T4; checkpoint 0.54 GB against 1.50 GB
+
+fp16 original: ready after 120.6 s
+  quantization=none
+  hellaswag acc_norm 0.50
+  1 at a time, 1,024 in      req/s  0.60  out tok/s   76.6  TTFT p50  248 p99   364 ms  TPOT p50  11.2 p99  11.3 ms
+  32 concurrent, 1,024 in    req/s  1.36  out tok/s  174.4  TTFT p50 4494 p99  9819 ms  TPOT p50 137.0 p99 167.9 ms
+
+W4A16 quantised: ready after 128.6 s
+  quantization=compressed
+  hellaswag acc_norm 0.45
+  1 at a time, 1,024 in      req/s  0.76  out tok/s   97.9  TTFT p50  251 p99   380 ms  TPOT p50   8.3 p99   8.4 ms
+  32 concurrent, 1,024 in    req/s  1.38  out tok/s  176.9  TTFT p50 5170 p99 11777 ms  TPOT p50 128.8 p99 171.6 ms
+```
+
+The notebook's servers run with `--gpu-memory-utilization 0.8`: after quantising in the same process the
+notebook holds about two gigabytes, and the default 0.9 is refused with "Free memory on device ... is less than
+desired". The step went from 11.2 to 8.3 ms, the score from 0.50 to 0.45 on 100 examples, inside the sample's
+error; at thirty-two at once the T4 is far past its knee either way, and the two checkpoints tie.
