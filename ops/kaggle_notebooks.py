@@ -474,7 +474,7 @@ stop(proc)"""),
 LAB13 = [
     ("markdown", "# Lab 13: many fine-tunes on one base\n\nTwo rank-8 adapters made in the notebook (random weights: this lab measures cost, not quality) behind one server, and what each costs per step."),
     ("code", CHECK), ("code", INSTALL),
-    ("code", '# Cell 3: peft, to write the adapters.\n%pip install -q "peft==0.21.2" 2>&1 | tail -1'),
+    ("code", '# Cell 3: peft, to write the adapters. Kaggle ships an old torchao that peft refuses, so it is removed.\n%pip install -q "peft==0.21.2" 2>&1 | tail -1\n%pip uninstall -y -q torchao'),
     ("code", HELPERS), ("code", STREAM_MODEL), ("code", "# Cell 6: the load generator and the benchmark call.\n" + LOAD + "\n" + BENCH_QUIET),
     ("code", r"""# Cell 7: two adapters.
 import os, torch
