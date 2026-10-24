@@ -21,7 +21,9 @@ modal run labs/00-first-request/modal/lab.py
 ```
 
 The first run builds the image (about two minutes) and downloads the model (about one minute); both are cached, so
-later labs start in seconds. The model cache and the compiled kernels live in two Modal volumes.
+later labs start in seconds. The model cache and the compiled kernels live in two Modal volumes. Lab 15 pulls the
+SGLang image for its second half, and Lab 16 asks for a two-L4 machine (`gpu="L4:2"`). A Starter workspace runs at
+most ten GPUs at once; a lab launched past that limit waits for a free one.
 
 ## Kaggle
 

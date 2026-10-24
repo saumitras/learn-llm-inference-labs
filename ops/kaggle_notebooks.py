@@ -292,6 +292,273 @@ for prefix in (0, 256, 512, 768):
 stop(proc)"""),
 ]
 
+BENCH_QUIET = BENCH.replace("def bench(", "def bench_quiet(").replace("def bench_quiet(rate, num_prompts, input_len=1024, output_len=128, max_concurrency=None):", "def bench_quiet(rate, num_prompts, input_len=1024, output_len=128, max_concurrency=None, model=None):").replace('["vllm", "bench", "serve", "--model", MODEL,', '["vllm", "bench", "serve", "--model", model or MODEL, "--tokenizer", MODEL,').replace("    print(text[i:] if i >= 0 else text[-3000:])\n    if out.returncode != 0: print(out.stderr[-2000:])", "    res = {}\n    for line in text.splitlines():\n        m = re.match(r'^(.*?):\\s+([0-9.]+)\\s*$', line)\n        if m: res[m.group(1).strip()] = float(m.group(2))\n    return res") + r"""
+def row(label, r):
+    g = lambda k: r.get(k, float("nan"))
+    return f"{label:<28} req/s {g('Request throughput (req/s)'):5.2f}  out tok/s {g('Output token throughput (tok/s)'):7.1f}  TTFT p50 {g('P50 TTFT (ms)'):6.0f} p99 {g('P99 TTFT (ms)'):6.0f} ms  TPOT p50 {g('P50 TPOT (ms)'):5.1f} p99 {g('P99 TPOT (ms)'):5.1f} ms  peak conc {g('Maximum request concurrency'):3.0f}"
+"""
+
+LOAD = r"""import random, threading
+def random_prompt(n_tokens, seed):
+    rng = random.Random(seed); words = ["river", "stone", "quiet", "engine", "orange", "ledger", "window", "copper", "signal", "harbor", "meadow", "lantern", "velvet", "summit", "cinder", "fable"]
+    return " ".join(rng.choice(words) for _ in range(int(n_tokens * 0.8)))
+
+def load_test(rate, num_prompts, prompt_len=512, out_len=128, prefix_len=0, model=None, concurrency=None):
+    rng = random.Random(1); prefix = random_prompt(prefix_len, 99) + " " if prefix_len else ""
+    prompts = [prefix + random_prompt(prompt_len - prefix_len, i) for i in range(num_prompts)]; results = []; lock = threading.Lock()
+    def one(i):
+        first, gaps, text = stream_chat([{"role": "user", "content": prompts[i]}], **({"model": model} if model else {}), max_tokens=out_len, temperature=0, ignore_eos=True)
+        with lock: results.append((first, (sum(gaps) / len(gaps)) if gaps else 0.0, len(gaps) + 1))
+    sem = threading.Semaphore(concurrency or num_prompts); t0 = time.time(); threads = []
+    def gated(i):
+        with sem: one(i)
+    for i in range(num_prompts):
+        th = threading.Thread(target=gated, args=(i,)); th.start(); threads.append(th)
+        if not concurrency: time.sleep(rng.expovariate(rate))
+    for th in threads: th.join()
+    dur = time.time() - t0; ttft = sorted(r[0] for r in results); tpot = sorted(r[1] for r in results); q = lambda xs, p: xs[min(len(xs) - 1, int(p * len(xs)))]
+    return {"req_s": round(len(results) / dur, 2), "out_tok_s": round(sum(r[2] for r in results) / dur, 1), "ttft_p50_ms": round(1000 * q(ttft, 0.5)), "ttft_p99_ms": round(1000 * q(ttft, 0.99)), "tpot_p50_ms": round(1000 * q(tpot, 0.5), 1), "tpot_p99_ms": round(1000 * q(tpot, 0.99), 1)}
+
+def load_row(label, r):
+    return f"{label:<30} req/s {r['req_s']:5.2f}  out tok/s {r['out_tok_s']:7.1f}  TTFT p50 {r['ttft_p50_ms']:6d} p99 {r['ttft_p99_ms']:6d} ms  TPOT p50 {r['tpot_p50_ms']:5.1f} p99 {r['tpot_p99_ms']:5.1f} ms"
+print("load generator ready")"""
+
+STREAM_MODEL = STREAM.replace('body = json.dumps({"model": MODEL, "messages": messages, "stream": True, **params}).encode()', 'body = json.dumps({"model": params.pop("model", MODEL), "messages": messages, "stream": True, **params}).encode()')
+
+LAB08 = [
+    ("markdown", "# Lab 08: FP8 weights\n\nThe official FP8 checkpoint on the same rate sweep as the BF16 one. **On the Kaggle T4 this lab is read-only for the FP8 half**: the T4 has no FP8 arithmetic and the engine refuses the checkpoint. The notebook shows the refusal, then runs the fp16 half of the sweep so you have your own baseline against the L4 numbers on the lab page."),
+    ("code", CHECK), ("code", INSTALL), ("code", HELPERS),
+    ("code", "# Cell 4: the benchmark call.\n" + BENCH_QUIET),
+    ("code", r"""# Cell 5: ask the T4 to serve the FP8 checkpoint, and read why it will not.
+FP8 = "Qwen/Qwen3-4B-Instruct-2507-FP8"
+MODEL_SAVED = MODEL; MODEL = FP8
+try:
+    proc, ready_s = serve(["--max-model-len", "4096"]); print(f"ready after {ready_s} s (this GPU accepted FP8)"); stop(proc)
+except RuntimeError as e:
+    text = open("/kaggle/working/serve.log").read()
+    for line in text.splitlines():
+        if "fp8" in line.lower() and ("error" in line.lower() or "support" in line.lower() or "capability" in line.lower()): print("  " + line[-200:])
+    print("  refused:", e)
+MODEL = MODEL_SAVED"""),
+    ("code", r"""# Cell 6: the fp16 half of the sweep, for your own baseline.
+proc, ready_s = serve(["--max-model-len", "4096"]); print(f"ready after {ready_s} s")
+print(row("1 at a time, 1,024 in", bench_quiet(rate="inf", num_prompts=16, input_len=1024, max_concurrency=1)))
+for rate in (1, 2, 4):
+    print(row(f"{rate} req/s, 512 in", bench_quiet(rate=rate, num_prompts=40, input_len=512)))
+stop(proc)"""),
+]
+
+LAB09 = [
+    ("markdown", "# Lab 09: INT4, quantised by you\n\nQuantise Qwen3-0.6B to W4A16 with LLM Compressor, score the original and the result with lm_eval against the running server, then measure the prefill penalty. The quantisation step runs on the T4; expect ten to twenty minutes for it."),
+    ("code", CHECK), ("code", INSTALL),
+    ("code", '# Cell 3: the quantisation and evaluation tools.\n%pip install -q "llmcompressor==0.14.0.1" "lm_eval[api]==0.4.13" 2>&1 | tail -2\nimport llmcompressor, lm_eval; print("llmcompressor", llmcompressor.__version__, "· lm_eval", lm_eval.__version__)'),
+    ("code", HELPERS.replace('MODEL = "%s"' % MODEL, 'MODEL = "Qwen/Qwen3-0.6B"')),
+    ("code", "# Cell 5: the benchmark call.\n" + BENCH_QUIET),
+    ("code", r"""# Cell 6: quantise. GPTQ, 4-bit weights with 16-bit activations, 128 calibration samples from wikitext.
+import os, time, torch
+from llmcompressor import oneshot
+from llmcompressor.modifiers.quantization import GPTQModifier
+from datasets import load_dataset
+from transformers import AutoTokenizer, AutoModelForCausalLM
+OUT = "/kaggle/working/Qwen3-0.6B-W4A16"
+tok = AutoTokenizer.from_pretrained(MODEL)
+model = AutoModelForCausalLM.from_pretrained(MODEL, device_map="cuda", dtype=torch.float16)
+ds = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="train").filter(lambda x: len(x["text"]) > 400).shuffle(seed=42).select(range(128))
+ds = ds.map(lambda x: tok(x["text"], max_length=2048, truncation=True, add_special_tokens=False), remove_columns=ds.column_names)
+t0 = time.time()
+oneshot(model=model, tokenizer=tok, dataset=ds, recipe=GPTQModifier(scheme="W4A16", targets="Linear", ignore=["lm_head"]), output_dir=OUT, max_seq_length=2048, num_calibration_samples=128, pipeline="basic")
+size = sum(os.path.getsize(os.path.join(OUT, f)) for f in os.listdir(OUT) if f.endswith(".safetensors"))
+print(f"took {time.time() - t0:.0f} s; checkpoint {size / 1e9:.2f} GB against 1.50 GB")
+del model; torch.cuda.empty_cache()"""),
+    ("code", r"""# Cell 7: serve each one, score it on 100 HellaSwag examples, measure it.
+def lm_eval_run(model_name, limit=100):
+    args = ["lm_eval", "--model", "local-completions", "--model_args", f"model={model_name},base_url={URL}/v1/completions,num_concurrent=8,max_retries=2,tokenized_requests=False", "--tasks", "hellaswag", "--limit", str(limit), "--batch_size", "8"]
+    out = subprocess.run(args, capture_output=True, text=True); text = out.stdout + out.stderr
+    acc = re.findall(r"acc_norm\s*\|[^|]*\|\s*([0-9.]+)", text); return acc[0] if acc else text[-600:]
+for label, model in (("fp16 original", "Qwen/Qwen3-0.6B"), ("W4A16 quantised", OUT)):
+    MODEL = model
+    proc, ready_s = serve(["--max-model-len", "4096"]); print(f"{label}: ready after {ready_s} s")
+    print("  " + log_lines("/kaggle/working/serve.log", {"q": r"quantization=[a-z0-9_]+"}).get("q", "quantization=none"))
+    print(f"  hellaswag acc_norm {lm_eval_run(model)}")
+    print("  " + row("1 at a time, 1,024 in", bench_quiet(rate="inf", num_prompts=16, input_len=1024, max_concurrency=1, model=model)))
+    print("  " + row("32 concurrent, 1,024 in", bench_quiet(rate="inf", num_prompts=64, input_len=1024, max_concurrency=32, model=model)))
+    stop(proc)
+MODEL = "Qwen/Qwen3-0.6B"
+"""),
+]
+
+LAB10 = [
+    ("markdown", "# Lab 10: the FP8 KV cache\n\nHalf the bytes per column. **On the Kaggle T4 this lab is read-only**: the FP8 KV cache needs compute capability 8.9 and the engine refuses it on the T4. The notebook shows the refusal, then reads the fp16 cache size and runs the long-context step so you can compare with the L4 numbers on the lab page."),
+    ("code", CHECK), ("code", INSTALL), ("code", HELPERS),
+    ("code", "# Cell 4: the benchmark call.\n" + BENCH_QUIET),
+    ("code", r"""# Cell 5: ask for the FP8 cache and read the refusal.
+try:
+    proc, ready_s = serve(["--max-model-len", "8192", "--kv-cache-dtype", "fp8"]); print(f"ready after {ready_s} s (this GPU accepted the FP8 cache)"); stop(proc)
+except RuntimeError as e:
+    for line in open("/kaggle/working/serve.log").read().splitlines():
+        if "fp8" in line.lower() and ("error" in line.lower() or "support" in line.lower() or "capability" in line.lower()): print("  " + line[-200:])
+    print("  refused:", e)"""),
+    ("code", r"""# Cell 6: the fp16 cache: its size, and the step at short and long context.
+proc, ready_s = serve(["--max-model-len", "8192"]); print(f"ready after {ready_s} s")
+for k, v in log_lines("/kaggle/working/serve.log", {"kv_memory": r"Available KV cache memory: [^\n]*", "kv_size": r"GPU KV cache size: [^\n]*"}).items(): print("  " + v)
+print(row("1 at a time, 512 in", bench_quiet(rate="inf", num_prompts=16, input_len=512, max_concurrency=1)))
+print(row("1 at a time, 6,000 in", bench_quiet(rate="inf", num_prompts=8, input_len=6000, output_len=256, max_concurrency=1)))
+print(row("16 concurrent, 2,048 in", bench_quiet(rate="inf", num_prompts=32, input_len=2048, max_concurrency=16)))
+stop(proc)"""),
+]
+
+LAB11 = [
+    ("markdown", "# Lab 11: speculative decoding, three ways\n\nn-gram lookup, Qwen3-0.6B as a draft model, and an EAGLE3 head, each against the plain server: time per token at batch 1, the acceptance rate from the counters, and what happens at batch 32. Each configuration restarts the server, so the whole notebook takes a while. The EAGLE3 head may not load on the T4; the cell says so if it does not."),
+    ("code", CHECK), ("code", INSTALL), ("code", HELPERS), ("code", STREAM),
+    ("code", "# Cell 5: the benchmark call.\n" + BENCH_QUIET),
+    ("code", r"""# Cell 6: four servers in turn.
+CONFIGS = [("none", []),
+    ("n-gram", ["--speculative-config", json.dumps({"method": "ngram", "num_speculative_tokens": 5, "prompt_lookup_max": 5, "prompt_lookup_min": 2})]),
+    ("draft model 0.6B", ["--speculative-config", json.dumps({"model": "Qwen/Qwen3-0.6B", "num_speculative_tokens": 5})]),
+    ("EAGLE3 head", ["--speculative-config", json.dumps({"method": "eagle3", "model": "taobao-mnn/Qwen3-4B-Instruct-2507-Eagle3", "num_speculative_tokens": 3})])]
+CODE = "Write a Python function that parses a CSV file into a list of dictionaries, with a docstring and type hints, and a second function that writes it back."
+PROSE = "Write a short, original poem about a city at night, without rhyme."
+SPEC = ["vllm:spec_decode_num_draft_tokens_total", "vllm:spec_decode_num_accepted_tokens_total"]
+for label, extra in CONFIGS:
+    print(f"\n== {label}")
+    try:
+        proc, ready_s = serve(["--max-model-len", "4096", *extra]); print(f"  ready after {ready_s} s")
+    except RuntimeError as e:
+        print("  could not start:", e); continue
+    for name, prompt in (("code", CODE), ("prose", PROSE)):
+        t0 = time.time(); first, gaps, text = stream_chat([{"role": "user", "content": prompt}], max_tokens=200, temperature=0, ignore_eos=True); took = time.time() - t0
+        print(f"  batch 1, {name:<5}: {len(gaps) + 1} tokens in {took:4.1f} s = {(len(gaps) + 1) / took:5.1f} tok/s")
+    m = metrics(SPEC)
+    if m: print(f"  drafted {int(m.get(SPEC[0], 0))} tokens, accepted {int(m.get(SPEC[1], 0))}: acceptance {100 * m.get(SPEC[1], 0) / max(1, m.get(SPEC[0], 1)):.0f}%")
+    print("  " + row("32 concurrent, 512 in", bench_quiet(rate="inf", num_prompts=64, input_len=512, max_concurrency=32)))
+    stop(proc)"""),
+]
+
+LAB12 = [
+    ("markdown", "# Lab 12: structured output\n\nA JSON schema on the request, the first-request grammar cost, what the grammar does to the step, and a failure mode you should see once: the grammar lets the model pad with whitespace."),
+    ("code", CHECK), ("code", INSTALL), ("code", HELPERS), ("code", STREAM),
+    ("code", r"""# Cell 5: two schemas and the request.
+SIMPLE = {"type": "object", "properties": {"name": {"type": "string"}, "age": {"type": "integer"}, "city": {"type": "string"}}, "required": ["name", "age", "city"], "additionalProperties": False}
+NESTED = {"type": "object", "properties": {"customer": {"type": "object", "properties": {"name": {"type": "string"}, "email": {"type": "string"}, "address": {"type": "object", "properties": {"street": {"type": "string"}, "city": {"type": "string"}, "postcode": {"type": "string"}}, "required": ["street", "city", "postcode"]}}, "required": ["name", "email", "address"]},
+  "items": {"type": "array", "items": {"type": "object", "properties": {"sku": {"type": "string"}, "quantity": {"type": "integer"}, "unit_price": {"type": "number"}}, "required": ["sku", "quantity", "unit_price"]}, "minItems": 2}, "total": {"type": "number"}, "paid": {"type": "boolean"}}, "required": ["customer", "items", "total", "paid"], "additionalProperties": False}
+PROMPT = "Invent an order for a small online shop with a customer in Pune and two items, as JSON."
+def ask(schema=None, name="s"):
+    params = {"max_tokens": 200, "temperature": 0}
+    if schema: params["response_format"] = {"type": "json_schema", "json_schema": {"name": name, "schema": schema}}
+    first, gaps, text = stream_chat([{"role": "user", "content": PROMPT}], **params); ok = "n/a"
+    if schema:
+        try: json.loads(text); ok = "valid JSON"
+        except Exception: ok = "INVALID: ends with " + repr(text[-30:])
+    return first, gaps, text, ok
+def rounds(title, schema, name):
+    print(title)
+    for i in range(2):
+        first, gaps, text, ok = ask(schema, name); print(f"  request {i + 1}: first token {1000 * first:.0f} ms, time per token {1000 * sum(gaps) / len(gaps):.1f} ms, {len(gaps) + 1} tokens, {ok}")
+    print("  " + text.replace("\n", " ")[:300])"""),
+    ("code", r"""# Cell 6: no schema, then the two schemas, twice each.
+proc, ready_s = serve(["--max-model-len", "4096"]); print(f"ready after {ready_s} s")
+first, gaps, text, _ = ask(); print(f"no schema: first token {1000 * first:.0f} ms, time per token {1000 * sum(gaps) / len(gaps):.1f} ms, {len(gaps) + 1} tokens\n  " + text.replace("\n", " ")[:200])
+rounds("simple schema", SIMPLE, "simple"); rounds("nested schema", NESTED, "nested")
+stop(proc)"""),
+    ("code", r"""# Cell 7: the same with any-whitespace disabled in the grammar.
+proc, ready_s = serve(["--max-model-len", "4096", "--structured-outputs-config", json.dumps({"backend": "xgrammar", "disable_any_whitespace": True})]); print(f"ready after {ready_s} s")
+rounds("simple schema", SIMPLE, "simple"); rounds("nested schema", NESTED, "nested")
+stop(proc)"""),
+]
+
+LAB13 = [
+    ("markdown", "# Lab 13: many fine-tunes on one base\n\nTwo rank-8 adapters made in the notebook (random weights: this lab measures cost, not quality) behind one server, and what each costs per step."),
+    ("code", CHECK), ("code", INSTALL),
+    ("code", '# Cell 3: peft, to write the adapters.\n%pip install -q "peft==0.21.2" 2>&1 | tail -1'),
+    ("code", HELPERS), ("code", STREAM_MODEL), ("code", "# Cell 6: the load generator and the benchmark call.\n" + LOAD + "\n" + BENCH_QUIET),
+    ("code", r"""# Cell 7: two adapters.
+import os, torch
+from transformers import AutoModelForCausalLM
+from peft import LoraConfig, get_peft_model
+base = AutoModelForCausalLM.from_pretrained(MODEL, torch_dtype=torch.float16)
+for name in ("legal", "support"):
+    m = get_peft_model(base, LoraConfig(r=8, lora_alpha=16, target_modules=["q_proj", "k_proj", "v_proj", "o_proj"], lora_dropout=0.0))
+    for p in m.parameters():
+        if p.requires_grad: torch.nn.init.normal_(p, std=0.02)
+    m.save_pretrained(f"/kaggle/working/lora-{name}"); del m
+    print(f"  adapter {name}: {sum(os.path.getsize(os.path.join(f'/kaggle/working/lora-{name}', f)) for f in os.listdir(f'/kaggle/working/lora-{name}')) / 1e6:.1f} MB")
+del base; torch.cuda.empty_cache()"""),
+    ("code", r"""# Cell 8: one server, the base plus both adapters.
+proc, ready_s = serve(["--max-model-len", "4096", "--enable-lora", "--max-lora-rank", "8", "--lora-modules", "legal=/kaggle/working/lora-legal", "support=/kaggle/working/lora-support"]); print(f"ready after {ready_s} s")
+for label, model in (("base", MODEL), ("adapter legal", "legal"), ("adapter support", "support")):
+    print(row(f"{label}, 1 at a time", bench_quiet(rate="inf", num_prompts=16, input_len=512, max_concurrency=1, model=model)))
+print(row("base x32", bench_quiet(rate="inf", num_prompts=64, input_len=512, max_concurrency=32, model=MODEL)))
+res = {}
+def go(name): res[name] = load_test(rate=0, num_prompts=32, prompt_len=512, out_len=128, model=name, concurrency=16)
+ts = [threading.Thread(target=go, args=(n,)) for n in ("legal", "support")]; [t.start() for t in ts]; [t.join() for t in ts]
+print(f"mixed x32 (16 legal + 16 support)      out tok/s {sum(r['out_tok_s'] for r in res.values()):7.1f}  TPOT p50 {res['legal']['tpot_p50_ms']:5.1f} / {res['support']['tpot_p50_ms']:5.1f} ms")
+stop(proc)"""),
+]
+
+LAB14 = [
+    ("markdown", "# Lab 14: cold start, the metrics endpoint, and the thinking switch\n\nTime to ready with and without compilation; the metrics endpoint idle and under a burst of forty; the hybrid Qwen3-4B with thinking off and on."),
+    ("code", CHECK), ("code", INSTALL), ("code", HELPERS), ("code", STREAM),
+    ("code", r"""# Cell 5: cold start three ways.
+for label, extra in (("default", []), ("--enforce-eager", ["--enforce-eager"]), ("default, second start", [])):
+    proc, ready_s = serve(["--max-model-len", "4096", *extra]); ll = log_lines("/kaggle/working/serve.log", STARTUP)
+    print(f"  {label:<22} ready after {ready_s:6.1f} s   {ll.get('weights', '')[:30]}   {ll.get('graphs', 'no graph capture')[:45]}")
+    if label != "default, second start": stop(proc)"""),
+    ("code", r"""# Cell 6: the metrics endpoint, idle and during a burst of forty.
+import threading
+NAMES = ["vllm:num_requests_running", "vllm:num_requests_waiting", "vllm:kv_cache_usage_perc", "vllm:num_preemptions_total", "vllm:prefix_cache_queries_total", "vllm:prefix_cache_hits_total", "vllm:generation_tokens_total"]
+print("  idle:", {k.split(':')[1]: v for k, v in metrics(NAMES).items()})
+sysmsg = "You are the support assistant for a small online shop. " * 20
+def one(i): chat([{"role": "system", "content": sysmsg}, {"role": "user", "content": f"Question {i}: tell me about your returns policy in detail."}], max_tokens=300, temperature=0)
+ts = [threading.Thread(target=one, args=(i,)) for i in range(40)]; [t.start() for t in ts]
+print("  second running waiting kv%  preempt  prefix hit%  gen tokens"); g0 = metrics(NAMES).get(NAMES[6], 0)
+for s in range(1, 16):
+    time.sleep(1); m = metrics(NAMES)
+    print(f"  {s:>6} {int(m.get(NAMES[0], 0)):>7} {int(m.get(NAMES[1], 0)):>7} {100 * m.get(NAMES[2], 0):4.0f} {int(m.get(NAMES[3], 0)):>8} {100 * m.get(NAMES[5], 0) / max(1, m.get(NAMES[4], 1)):10.0f}% {int(m.get(NAMES[6], 0) - g0):>10}")
+[t.join() for t in ts]; stop(proc)"""),
+    ("code", r"""# Cell 7: the thinking switch on the hybrid Qwen3-4B.
+MODEL = "Qwen/Qwen3-4B"
+proc, ready_s = serve(["--max-model-len", "8192"]); print(f"ready after {ready_s} s")
+q = "A shop sells pens at 3 for 2 dollars. How much do 12 pens cost? Answer briefly."
+for think in (False, True):
+    t0 = time.time(); r = chat([{"role": "user", "content": q}], max_tokens=1500, temperature=0, chat_template_kwargs={"enable_thinking": think}); took = time.time() - t0
+    print(f"  thinking {str(think):<5}: {r['usage']['completion_tokens']:5d} completion tokens in {took:5.1f} s   answer: {r['choices'][0]['message']['content'].strip().replace(chr(10), ' ')[-90:]}")
+stop(proc)"""),
+]
+
+LAB15 = [
+    ("markdown", "# Lab 15: two engines, same traffic\n\nvLLM and SGLang one after the other on random and shared-prefix traffic, with the same load generator so the client is identical. SGLang is installed into the same environment after the vLLM half; if its install conflicts with the engine already installed, the second half will say so."),
+    ("code", CHECK), ("code", INSTALL), ("code", HELPERS), ("code", STREAM), ("code", "# Cell 5: the load generator.\n" + LOAD),
+    ("code", r"""# Cell 6: vLLM.
+def traffic(engine):
+    for label, prefix in (("random prompts", 0), ("75% shared prefix", 768)):
+        print("  " + load_row(f"{engine}: {label}", load_test(rate=2, num_prompts=32, prompt_len=1024, out_len=128, prefix_len=prefix)))
+proc, ready_s = serve(["--max-model-len", "4096"]); print(f"vLLM ready after {ready_s} s"); traffic("vLLM"); stop(proc)"""),
+    ("code", r"""# Cell 7: SGLang.
+import subprocess, sys
+subprocess.run([sys.executable, "-m", "pip", "install", "-q", "sglang[all]==0.5.22"], check=False)
+log = open("/kaggle/working/sglang.log", "w"); t0 = time.time()
+proc = subprocess.Popen([sys.executable, "-m", "sglang.launch_server", "--model-path", MODEL, "--port", "8000", "--context-length", "4096", "--dtype", "half"], stdout=log, stderr=subprocess.STDOUT)
+while time.time() - t0 < 900 and proc.poll() is None:
+    try: urllib.request.urlopen(URL + "/health", timeout=2); break
+    except Exception: time.sleep(0.5)
+if proc.poll() is not None: print("SGLang did not start; last lines:\n" + "\n".join(open("/kaggle/working/sglang.log").read().splitlines()[-15:]))
+else: print(f"SGLang ready after {time.time() - t0:.0f} s"); traffic("SGLang"); proc.terminate(); proc.wait()"""),
+]
+
+LAB16 = [
+    ("markdown", "# Lab 16: two GPUs\n\nKaggle gives you two T4s. One GPU, then tensor parallel across both, then two data-parallel copies: the step, the shelf and the throughput for each."),
+    ("code", CHECK), ("code", INSTALL), ("code", HELPERS),
+    ("code", "# Cell 4: the benchmark call and the measurement.\n" + BENCH_QUIET + r"""
+def measure(label):
+    for k, v in log_lines("/kaggle/working/serve.log", {"kv": r"GPU KV cache size: [^\n]*"}).items(): print("  " + v)
+    print("  " + row(f"{label}: 1 at a time", bench_quiet(rate="inf", num_prompts=16, input_len=512, max_concurrency=1)))
+    for rate in (2, 4, 8):
+        print("  " + row(f"{label}: {rate} req/s", bench_quiet(rate=rate, num_prompts=64, input_len=512)))"""),
+    ("code", '# Cell 5: one T4.\nproc, ready_s = serve(["--max-model-len", "4096"]); print(f"ready after {ready_s} s"); measure("1 GPU"); stop(proc)'),
+    ("code", '# Cell 6: tensor parallel across both.\nproc, ready_s = serve(["--max-model-len", "4096", "--tensor-parallel-size", "2"]); print(f"ready after {ready_s} s"); measure("TP=2"); stop(proc)'),
+    ("code", '# Cell 7: two data-parallel copies.\nproc, ready_s = serve(["--max-model-len", "4096", "--data-parallel-size", "2"]); print(f"ready after {ready_s} s"); measure("DP=2"); stop(proc)'),
+]
+
 
 def write(path, cells):
     nb = {"cells": [{"cell_type": t, "metadata": {}, "source": src.splitlines(keepends=True), **({"outputs": [], "execution_count": None} if t == "code" else {})} for t, src in cells],
@@ -310,4 +577,13 @@ if __name__ == "__main__":
     write("labs/05-chunked-prefill/kaggle/lab.ipynb", LAB05)
     write("labs/06-kv-pool/kaggle/lab.ipynb", LAB06)
     write("labs/07-prefix-caching/kaggle/lab.ipynb", LAB07)
-    print("wrote 8 notebooks")
+    write("labs/08-fp8-weights/kaggle/lab.ipynb", LAB08)
+    write("labs/09-int4/kaggle/lab.ipynb", LAB09)
+    write("labs/10-fp8-kv-cache/kaggle/lab.ipynb", LAB10)
+    write("labs/11-speculative-decoding/kaggle/lab.ipynb", LAB11)
+    write("labs/12-structured-output/kaggle/lab.ipynb", LAB12)
+    write("labs/13-multi-lora/kaggle/lab.ipynb", LAB13)
+    write("labs/14-cold-start-and-metrics/kaggle/lab.ipynb", LAB14)
+    write("labs/15-two-engines/kaggle/lab.ipynb", LAB15)
+    write("labs/16-two-gpus/kaggle/lab.ipynb", LAB16)
+    print("wrote 17 notebooks")

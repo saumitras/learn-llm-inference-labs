@@ -17,13 +17,15 @@ MODEL = "Qwen/Qwen3-4B-Instruct-2507"
 PORT = 8000
 URL = f"http://127.0.0.1:{PORT}"
 
-image = (
+base_image = (
     modal.Image.from_registry("nvidia/cuda:13.0.1-devel-ubuntu24.04", add_python="3.12")
     .pip_install(f"vllm=={VLLM_VERSION}", "openai>=1.0")
     .env({"HF_HUB_ENABLE_HF_TRANSFER": "0", "VLLM_LOGGING_LEVEL": "INFO"})
     # Ship this module into the container; Modal only sends the lab script itself by default.
-    .add_local_python_source("common")
+
 )
+# Local sources must be added last; a lab that needs extra packages builds on base_image and adds "common" itself.
+image = base_image.add_local_python_source("common")
 hf_cache = modal.Volume.from_name("llminference-hf-cache", create_if_missing=True)
 compile_cache = modal.Volume.from_name("llminference-vllm-cache", create_if_missing=True)
 VOLUMES = {"/root/.cache/huggingface": hf_cache, "/root/.cache/vllm": compile_cache}
@@ -137,7 +139,7 @@ def stream_chat(messages, model=MODEL, **params):
 
 def bench_serve(rate, num_prompts, input_len=1024, output_len=128, max_concurrency=None, prefix_len=0, model=MODEL, extra=()):
     """Run `vllm bench serve` and return the parsed result lines as a dict of floats."""
-    args = ["vllm", "bench", "serve", "--model", model, "--port", str(PORT), "--dataset-name", "random",
+    args = ["vllm", "bench", "serve", "--model", model, "--tokenizer", MODEL, "--port", str(PORT), "--dataset-name", "random",
             "--random-input-len", str(input_len), "--random-output-len", str(output_len), "--num-prompts", str(num_prompts),
             "--request-rate", str(rate), "--metric-percentiles", "50,95,99", "--percentile-metrics", "ttft,tpot,itl,e2el",
             "--ignore-eos", "--seed", "0", "--random-prefix-len", str(prefix_len), *extra]
@@ -161,6 +163,59 @@ def bench_row(label, r):
     return (f"{label:<26} req/s {g('Request throughput (req/s)'):5.2f}  out tok/s {g('Output token throughput (tok/s)'):7.1f}  "
             f"TTFT p50 {g('P50 TTFT (ms)'):7.0f} p99 {g('P99 TTFT (ms)'):7.0f} ms  TPOT p50 {g('P50 TPOT (ms)'):5.1f} p99 {g('P99 TPOT (ms)'):5.1f} ms  "
             f"peak conc {g('Peak concurrent requests'):3.0f}")
+
+
+models_volume = modal.Volume.from_name("llminference-models", create_if_missing=True)
+VOLUMES_WITH_MODELS = {**VOLUMES, "/models": models_volume}
+
+
+def random_prompt(n_tokens, seed):
+    """About n_tokens of varied text, deterministic per seed, so prefix caching cannot collapse it."""
+    import random
+    rng = random.Random(seed)
+    words = ["river", "stone", "quiet", "engine", "orange", "ledger", "window", "copper", "signal", "harbor", "meadow", "lantern", "velvet", "summit", "cinder", "fable"]
+    return " ".join(rng.choice(words) for _ in range(int(n_tokens * 0.8)))
+
+
+def load_test(rate, num_prompts, prompt_len=512, out_len=128, prefix_len=0, model=MODEL, concurrency=None):
+    """A small load generator that works against any OpenAI-compatible server: Poisson arrivals at `rate` per
+    second (or a fixed concurrency), streaming requests, p50/p99 of TTFT and TPOT, and output tokens per second."""
+    import random, threading
+    rng = random.Random(1)
+    prefix = random_prompt(prefix_len, 99) + " " if prefix_len else ""
+    prompts = [prefix + random_prompt(prompt_len - prefix_len, i) for i in range(num_prompts)]
+    results = []
+    lock = threading.Lock()
+    def one(i):
+        first, gaps, text = stream_chat([{"role": "user", "content": prompts[i]}], model=model, max_tokens=out_len, temperature=0, ignore_eos=True)
+        with lock:
+            results.append((first, (sum(gaps) / len(gaps)) if gaps else 0.0, len(gaps) + 1))
+    t0 = time.time()
+    threads = []
+    if concurrency:
+        sem = threading.Semaphore(concurrency)
+        def gated(i):
+            with sem:
+                one(i)
+        for i in range(num_prompts):
+            th = threading.Thread(target=gated, args=(i,)); th.start(); threads.append(th)
+    else:
+        for i in range(num_prompts):
+            th = threading.Thread(target=one, args=(i,)); th.start(); threads.append(th)
+            time.sleep(rng.expovariate(rate))
+    for th in threads:
+        th.join()
+    dur = time.time() - t0
+    ttft = sorted(r[0] for r in results); tpot = sorted(r[1] for r in results)
+    q = lambda xs, p: xs[min(len(xs) - 1, int(p * len(xs)))]
+    return {"req_s": round(len(results) / dur, 2), "out_tok_s": round(sum(r[2] for r in results) / dur, 1),
+            "ttft_p50_ms": round(1000 * q(ttft, 0.5)), "ttft_p99_ms": round(1000 * q(ttft, 0.99)),
+            "tpot_p50_ms": round(1000 * q(tpot, 0.5), 1), "tpot_p99_ms": round(1000 * q(tpot, 0.99), 1), "duration_s": round(dur, 1)}
+
+
+def load_row(label, r):
+    return (f"{label:<30} req/s {r['req_s']:5.2f}  out tok/s {r['out_tok_s']:7.1f}  TTFT p50 {r['ttft_p50_ms']:6d} p99 {r['ttft_p99_ms']:6d} ms  "
+            f"TPOT p50 {r['tpot_p50_ms']:5.1f} p99 {r['tpot_p99_ms']:5.1f} ms")
 
 
 def banner(title):
