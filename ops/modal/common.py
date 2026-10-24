@@ -107,5 +107,61 @@ def chat(messages, model=MODEL, **params):
     return json.loads(urllib.request.urlopen(req, timeout=300).read())
 
 
+def stream_chat(messages, model=MODEL, **params):
+    """A streaming chat request. Returns (first_token_s, [gap_s, ...], text): time to first token and the gaps between tokens."""
+    body = json.dumps({"model": model, "messages": messages, "stream": True, **params}).encode()
+    req = urllib.request.Request(URL + "/v1/chat/completions", data=body, headers={"Content-Type": "application/json"})
+    t0 = time.time()
+    first = None
+    last = None
+    gaps = []
+    text = []
+    with urllib.request.urlopen(req, timeout=600) as resp:
+        for raw in resp:
+            line = raw.decode().strip()
+            if not line.startswith("data:") or line == "data: [DONE]":
+                continue
+            chunk = json.loads(line[5:])
+            delta = chunk["choices"][0].get("delta", {}).get("content")
+            if not delta:
+                continue
+            now = time.time()
+            if first is None:
+                first = now - t0
+            else:
+                gaps.append(now - last)
+            last = now
+            text.append(delta)
+    return first, gaps, "".join(text)
+
+
+def bench_serve(rate, num_prompts, input_len=1024, output_len=128, max_concurrency=None, prefix_len=0, model=MODEL, extra=()):
+    """Run `vllm bench serve` and return the parsed result lines as a dict of floats."""
+    args = ["vllm", "bench", "serve", "--model", model, "--port", str(PORT), "--dataset-name", "random",
+            "--random-input-len", str(input_len), "--random-output-len", str(output_len), "--num-prompts", str(num_prompts),
+            "--request-rate", str(rate), "--metric-percentiles", "50,95,99", "--percentile-metrics", "ttft,tpot,itl,e2el",
+            "--ignore-eos", "--seed", "0", "--random-prefix-len", str(prefix_len), *extra]
+    if max_concurrency:
+        args += ["--max-concurrency", str(max_concurrency)]
+    out = subprocess.run(args, capture_output=True, text=True)
+    res = {}
+    for line in out.stdout.splitlines():
+        m = re.match(r"^(.*?):\s+([0-9.]+)\s*$", line)
+        if m:
+            res[m.group(1).strip()] = float(m.group(2))
+    if out.returncode != 0:
+        print(out.stderr[-1500:])
+    res["_stdout"] = out.stdout
+    return res
+
+
+def bench_row(label, r):
+    """One line of a results table from a bench_serve result."""
+    g = lambda k: r.get(k, float("nan"))
+    return (f"{label:<26} req/s {g('Request throughput (req/s)'):5.2f}  out tok/s {g('Output token throughput (tok/s)'):7.1f}  "
+            f"TTFT p50 {g('P50 TTFT (ms)'):7.0f} p99 {g('P99 TTFT (ms)'):7.0f} ms  TPOT p50 {g('P50 TPOT (ms)'):5.1f} p99 {g('P99 TPOT (ms)'):5.1f} ms  "
+            f"peak conc {g('Peak concurrent requests'):3.0f}")
+
+
 def banner(title):
     print("\n" + "=" * 72 + f"\n{title}\n" + "=" * 72)
