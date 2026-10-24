@@ -37,3 +37,36 @@ Two L4s, data parallel (--data-parallel-size 2)
 Splitting the model halves the weights each GPU reads per step: 18.7 ms against 33.3 at batch 1, and a shelf of
 224,048 tokens because each GPU holds 4 GB of weights instead of 8. Two whole copies keep the 33 ms step and
 add capacity: 1,010 tokens a second at 16 req/s against 870 for one GPU and 1,149 for the split pair.
+
+## Expected output, Kaggle T4 ×2 (captured 25 October 2026, vLLM 0.32.0, fp16; each sweep row is 64 prompts of 512 tokens, 128-token answers)
+
+```
+One T4
+  ready after 206.3 s
+  GPU KV cache size: 31,856 tokens, Maximum concurrency for 4,096 tokens per request: 7.78x
+  1 GPU: 1 at a time   req/s 0.19  out tok/s  24.4  TTFT p50  276 p99  1099 ms  TPOT p50  38.6 p99  39.2 ms
+  1 GPU: 2 req/s       req/s 1.23  out tok/s 157.4  TTFT p50 1296 p99  4429 ms  TPOT p50 214.0 p99 245.1 ms
+  1 GPU: 4 req/s       req/s 1.31  out tok/s 167.2  TTFT p50 1802 p99 23789 ms  TPOT p50 236.2 p99 270.9 ms
+  1 GPU: 8 req/s       req/s 1.32  out tok/s 169.0  TTFT p50 5011 p99 32217 ms  TPOT p50 243.2 p99 269.5 ms
+
+Two T4s, tensor parallel (--tensor-parallel-size 2)
+  ready after 154.7 s
+  GPU KV cache size: 126,464 tokens, Maximum concurrency for 4,096 tokens per request: 30.88x
+  TP=2: 1 at a time    req/s 0.33  out tok/s  42.7  TTFT p50  196 p99  1087 ms  TPOT p50  21.5 p99  21.8 ms
+  TP=2: 2 req/s        req/s 1.62  out tok/s 207.1  TTFT p50  674 p99  4713 ms  TPOT p50 107.9 p99 153.1 ms
+  TP=2: 4 req/s        req/s 2.77  out tok/s 354.8  TTFT p50  141 p99   230 ms  TPOT p50  56.6 p99  64.9 ms
+  TP=2: 8 req/s        req/s 3.57  out tok/s 457.1  TTFT p50  189 p99   288 ms  TPOT p50  80.8 p99  85.4 ms
+
+Two T4s, data parallel (--data-parallel-size 2)
+  ready after 186.2 s
+  GPU KV cache size: 31,856 tokens (per copy), Maximum concurrency for 4,096 tokens per request: 7.78x
+  DP=2: 1 at a time    req/s 0.15  out tok/s  19.3  TTFT p50  390 p99  1275 ms  TPOT p50  44.7 p99  67.9 ms
+  DP=2: 2 req/s        req/s 1.44  out tok/s 184.7  TTFT p50  785 p99  3505 ms  TPOT p50 126.1 p99 148.6 ms
+  DP=2: 4 req/s        req/s 2.25  out tok/s 287.9  TTFT p50  394 p99  1553 ms  TPOT p50 102.2 p99 117.2 ms
+  DP=2: 8 req/s        req/s 2.83  out tok/s 362.2  TTFT p50  278 p99   889 ms  TPOT p50 109.3 p99 128.3 ms
+```
+
+The T4 pair tells the L4 pair's story more sharply, because one T4 is so small: the split model halves the step
+(38.6 to 21.5 ms), quadruples the shelf (31,856 to 126,464 tokens), and takes the 8 req/s row from 169 tokens a
+second with a 32-second first token to 457 with a first token under 0.3 s. Two copies help less than the split
+here, because each copy keeps the small shelf and the single T4's knee.
