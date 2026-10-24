@@ -38,3 +38,28 @@ almost nothing to copy in fresh prose and code (6 percent accepted), the 0.6B dr
 its own five steps cost more than the verification saved, and the EAGLE3 head accepted a third of its drafts and
 still landed 5 ms per token behind. Token counts differ between runs because speculative decoding changes the
 sampled sequence slightly at temperature zero only when ties break differently; the model stops when it stops.
+
+## Expected output, Kaggle T4 ×2 (captured 25 October 2026, vLLM 0.32.0, `--dtype half`)
+
+```
+none              ready after 235.3 s
+  batch 1, code : 200 tokens in  8.2 s =  24.5 tok/s      batch 1, prose: 198 tokens in  7.1 s =  27.8 tok/s
+  32 concurrent, 512 in   req/s 1.17  out tok/s 149.6  TTFT p50  4519 p99 16657 ms  TPOT p50 154.2 p99 206.9 ms
+n-gram            ready after 158.7 s
+  batch 1, code : 179 tokens in  8.2 s =  21.9 tok/s      batch 1, prose: 130 tokens in  5.3 s =  24.3 tok/s
+  drafted 1545 tokens, accepted 91: acceptance 6%
+  32 concurrent, 512 in   req/s 1.38  out tok/s 176.7  TTFT p50  1464 p99 11093 ms  TPOT p50 103.6 p99 277.7 ms
+draft model 0.6B  ready after 209.2 s
+  batch 1, code :  62 tokens in  9.3 s =   6.6 tok/s      batch 1, prose:  80 tokens in 10.8 s =   7.4 tok/s
+  drafted 705 tokens, accepted 261: acceptance 37%
+  32 concurrent, 512 in   req/s 0.90  out tok/s 115.0  TTFT p50 10745 p99 25674 ms  TPOT p50 123.8 p99 321.4 ms
+EAGLE3 head       ready after 185.2 s
+  batch 1, code : 101 tokens in  5.2 s =  19.2 tok/s      batch 1, prose: 101 tokens in  4.6 s =  22.1 tok/s
+  drafted 603 tokens, accepted 200: acceptance 33%
+  32 concurrent, 512 in   req/s 1.36  out tok/s 173.8  TTFT p50  1682 p99 13009 ms  TPOT p50 107.7 p99 258.8 ms
+```
+
+The same verdict as on the L4, with the same acceptance rates to within a few points: nothing beat the plain
+server at batch 1. The EAGLE3 head loaded and ran on the T4. The thirty-two-at-once rows are all past the T4's
+knee and differ mostly in queueing; the plain server's slow first row is the one that paid the Triton kernel's
+first compilation.
