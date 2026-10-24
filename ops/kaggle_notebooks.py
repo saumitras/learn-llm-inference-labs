@@ -559,6 +559,108 @@ def measure(label):
     ("code", '# Cell 7: two data-parallel copies.\nproc, ready_s = serve(["--max-model-len", "4096", "--data-parallel-size", "2"]); print(f"ready after {ready_s} s"); measure("DP=2"); stop(proc)'),
 ]
 
+CAP_A = [
+    ("markdown", "# Capstone A: tune to an SLO\n\nThe support bot's traffic shape and targets, a rate sweep on each configuration until the p99s cross the targets, the GPUs the fleet needs, and a quality gate. On the Kaggle T4 the FP8 configurations are read-only (no FP8 arithmetic), so the notebook sweeps the fp16 server and one scheduler knob, then runs the quality gate on it. Budget about forty minutes."),
+    ("code", CHECK), ("code", INSTALL),
+    ("code", '# Cell 3: the evaluation harness for the quality gate.\n%pip install -q "lm_eval[api]==0.4.13" 2>&1 | tail -1'),
+    ("code", HELPERS),
+    ("code", "# Cell 5: the benchmark call, the targets and the traffic shape.\n" + BENCH_QUIET.replace("def bench_quiet(rate, num_prompts, input_len=1024, output_len=128, max_concurrency=None, model=None):", "def bench_quiet(rate, num_prompts, input_len=1024, output_len=128, max_concurrency=None, model=None, prefix_len=0):").replace('"--ignore-eos", "--seed", "0"]', '"--ignore-eos", "--seed", "0", "--random-prefix-len", str(prefix_len)]') + r"""
+PREFIX, INPUT, OUTPUT, NEEDED_RATE = 600, 1300, 300, 8.3      # the support bot from the capacity module: 500 users, one message a minute
+TTFT_P99_MS, TPOT_P99_MS = 1000, 75
+def sweep(label, rates=(1, 2, 3, 4, 6, 8)):
+    top = 0.0
+    for rate in rates:
+        r = bench_quiet(rate=rate, num_prompts=48, input_len=INPUT - PREFIX, output_len=OUTPUT, prefix_len=PREFIX)
+        ok = r.get("P99 TTFT (ms)", 1e9) <= TTFT_P99_MS and r.get("P99 TPOT (ms)", 1e9) <= TPOT_P99_MS
+        print(("  OK   " if ok else "  MISS ") + row(f"{rate} req/s", r))
+        if ok: top = r.get("Request throughput (req/s)", 0.0)
+        elif top: break
+    print(f"  {label}: highest rate inside the target {top:.2f} req/s  ->  GPUs for {NEEDED_RATE} req/s: {NEEDED_RATE / top if top else float('inf'):.1f}")
+    return top"""),
+    ("code", r"""# Cell 6: fp16, defaults.
+proc, ready_s = serve(["--max-model-len", "4096"]); print(f"ready after {ready_s} s"); best = {}
+best["fp16, defaults"] = sweep("fp16, defaults"); stop(proc)"""),
+    ("code", r"""# Cell 7: the same with max-num-seqs capped at 16: the step stays short, the queue takes the overflow.
+proc, ready_s = serve(["--max-model-len", "4096", "--max-num-seqs", "16"]); print(f"ready after {ready_s} s")
+best["fp16, max-num-seqs 16"] = sweep("fp16, max-num-seqs 16"); stop(proc)"""),
+    ("code", r"""# Cell 8: the FP8 configurations are read-only on the T4: the engine refuses the checkpoint. Read the L4 rows on the capstone page.
+import math
+for label, top in best.items():
+    print(f"  {label:<26} {top:5.2f} req/s per GPU inside the target   fleet for 500 users: {math.ceil(NEEDED_RATE / top) if top else '-'} GPUs")"""),
+    ("code", r"""# Cell 9: the quality gate: lm_eval on 100 HellaSwag examples against the running server.
+proc, ready_s = serve(["--max-model-len", "4096"]); print(f"ready after {ready_s} s")
+args = ["lm_eval", "--model", "local-completions", "--model_args", f"model={MODEL},base_url={URL}/v1/completions,num_concurrent=8,max_retries=2,tokenized_requests=False", "--tasks", "hellaswag", "--limit", "100", "--batch_size", "8"]
+out = subprocess.run(args, capture_output=True, text=True); acc = re.findall(r"acc_norm\s*\|[^|]*\|\s*([0-9.]+)", out.stdout + out.stderr)
+print("  fp16 acc_norm", acc[0] if acc else (out.stdout + out.stderr)[-600:]); stop(proc)"""),
+]
+
+CAP_B = [
+    ("markdown", "# Capstone B: engineer the cache\n\nA multi-turn support agent on one engine with a careless prompt layout, then a careful one; then two engines, one per T4, behind a router that is round-robin, then session-sticky. Kaggle's two T4s make the two-engine half run as written."),
+    ("code", CHECK), ("code", INSTALL), ("code", HELPERS.replace('def serve(extra_args=(), log_path="/kaggle/working/serve.log", timeout_s=900):', 'def serve(extra_args=(), log_path="/kaggle/working/serve.log", timeout_s=900, port=8000, env=None):').replace('args = ["vllm", "serve", MODEL, "--port", "8000", "--dtype", "half", *extra_args]', 'import os\n    args = ["vllm", "serve", MODEL, "--port", str(port), "--dtype", "half", *extra_args]').replace('proc = subprocess.Popen(args, stdout=log, stderr=subprocess.STDOUT)', 'proc = subprocess.Popen(args, stdout=log, stderr=subprocess.STDOUT, env={**os.environ, **(env or {})})').replace('urllib.request.urlopen(URL + "/health", timeout=2); return proc', 'urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=2); return proc')),
+    ("code", STREAM.replace('def stream_chat(messages, **params):', 'def stream_chat(messages, url=URL, **params):').replace('req = urllib.request.Request(URL + "/v1/chat/completions"', 'req = urllib.request.Request(url + "/v1/chat/completions"').replace('def metrics(names):', 'def metrics(names, url=URL):').replace('urllib.request.urlopen(URL + "/metrics", timeout=5)', 'urllib.request.urlopen(url + "/metrics", timeout=5)')),
+    ("code", r"""# Cell 5: the agent: a policy, a tool list, tool results that grow turn by turn, and two layouts of the same prompt.
+import hashlib, random, threading
+NAMES = ["vllm:prefix_cache_queries_total", "vllm:prefix_cache_hits_total"]
+POLICY = "You are the support assistant for a small online shop. " + " ".join(f"Policy clause {i}: items may be returned within thirty days in their original packaging with proof of purchase, and refunds reach the original payment method within five working days." for i in range(22))
+TOOLS = "Tools you may call: " + " ".join(f"tool_{i}(order_id) returns the {w} of an order." for i, w in enumerate(["status", "items", "shipping address", "carrier", "tracking events", "invoice", "refund state", "notes"] * 2))
+TURNS = 6
+def tool_result(session, turn):
+    rng = random.Random(session * 100 + turn)
+    return "Tool result: " + " ".join(f"order {rng.randint(1000, 9999)} line {i}: {rng.choice(['shipped', 'packed', 'delayed', 'delivered'])} via carrier {rng.randint(1, 9)};" for i in range(14))
+def session_messages(session, turn, layout):
+    stamp = f"Session {session}, current time 2026-10-24T12:{turn:02d}:00Z."
+    tools_so_far = " ".join(tool_result(session, t) for t in range(turn))
+    system = (stamp + " " + tools_so_far + " " + POLICY + " " + TOOLS) if layout == "careless" else (POLICY + " " + TOOLS + " " + tools_so_far + " " + stamp)
+    history = []
+    for t in range(turn):
+        history += [{"role": "user", "content": f"Question {t} from session {session}: where is my order and when does it arrive?"}, {"role": "assistant", "content": f"Answer {t}: " + "your order is on its way and should arrive within two working days; " * 6}]
+    return [{"role": "system", "content": system}, *history, {"role": "user", "content": f"Question {turn} from session {session}: where is my order and when does it arrive?"}]
+def hits(url=URL):
+    m = metrics(NAMES, url=url); return m.get(NAMES[0], 0), m.get(NAMES[1], 0)
+def run_sessions(n_sessions, layout, route, urls):
+    firsts = {}; lock = threading.Lock(); before = [hits(u) for u in urls]; t0 = time.time()
+    def one(session):
+        for turn in range(TURNS):
+            first, _, _ = stream_chat(session_messages(session, turn, layout), url=urls[route(session, turn, len(urls))], max_tokens=24, temperature=0)
+            with lock: firsts.setdefault(turn, []).append(first)
+    ths = [threading.Thread(target=one, args=(s,)) for s in range(n_sessions)]; [t.start() for t in ths]; [t.join() for t in ths]
+    took = time.time() - t0; after = [hits(u) for u in urls]
+    q = sum(a[0] - b[0] for a, b in zip(after, before)); h = sum(a[1] - b[1] for a, b in zip(after, before)); allf = sorted(f for fs in firsts.values() for f in fs)
+    per_turn = " ".join(f"t{t}:{1000 * sorted(firsts[t])[len(firsts[t]) // 2]:4.0f}" for t in range(TURNS))
+    print(f"  hit rate {100 * h / max(1, q):3.0f}%   TTFT p50 {1000 * allf[len(allf) // 2]:5.0f} p99 {1000 * allf[int(0.99 * (len(allf) - 1))]:5.0f} ms   per-turn p50 ms {per_turn}   {took:.0f} s")
+round_robin = lambda s, t, n: (s * TURNS + t) % n
+sticky = lambda s, t, n: int(hashlib.md5(str(s).encode()).hexdigest(), 16) % n"""),
+    ("code", r"""# Cell 6: one engine on GPU 0: careless, then careful, then 48 sessions.
+proc, ready_s = serve(["--max-model-len", "8192"], env={"CUDA_VISIBLE_DEVICES": "0"}); print(f"ready after {ready_s} s")
+for layout in ("careless", "careful"):
+    print(f"{layout}:"); run_sessions(24, layout, round_robin, [URL])
+print("careful, 48 sessions:"); run_sessions(48, "careful", round_robin, [URL])"""),
+    ("code", r"""# Cell 7: a second engine on GPU 1; 48 sessions behind round-robin, then session-sticky.
+proc2, ready2 = serve(["--max-model-len", "8192"], port=8001, log_path="/kaggle/working/serve2.log", env={"CUDA_VISIBLE_DEVICES": "1"}); print(f"second engine ready after {ready2} s")
+urls = [URL, "http://127.0.0.1:8001"]
+for name, policy in (("round-robin", round_robin), ("session-sticky", sticky)):
+    print(f"{name}:"); run_sessions(48, "careful", policy, urls)
+stop(proc); stop(proc2)"""),
+]
+
+CAP_C = [
+    ("markdown", "# Capstone C: cost per million tokens\n\nEach configuration driven from one request at a time up to 128 at once, and the price of a million output tokens at every point from the GPU's hourly rate. On Kaggle the T4 is free, so the notebook prices it as if rented: about $0.35 an hour is a typical cloud T4 rate. The FP8 rows on the capstone page are L4-only."),
+    ("code", CHECK), ("code", INSTALL), ("code", HELPERS),
+    ("code", "# Cell 4: the benchmark call and the ladder.\n" + BENCH_QUIET + r"""
+PRICE_PER_GPU_HOUR = 0.35
+INPUT, OUTPUT = 1024, 256
+def ladder(gpus):
+    print(f"  {'concurrency':>12} {'out tok/s':>10} {'TPOT p50':>9} {'TTFT p99':>9}  {'$ per 1M output':>15}  {'$ per 1M total':>14}")
+    for c in (1, 8, 32, 64):
+        r = bench_quiet(rate="inf", num_prompts=max(16, 2 * c), input_len=INPUT, output_len=OUTPUT, max_concurrency=c)
+        out = r.get("Output token throughput (tok/s)", 0.0); hourly = PRICE_PER_GPU_HOUR * gpus
+        per_out = hourly / (out * 3600 / 1e6) if out else float("inf"); per_total = per_out * OUTPUT / (INPUT + OUTPUT)
+        print(f"  {c:>12} {out:10.1f} {r.get('P50 TPOT (ms)', 0):8.1f}ms {r.get('P99 TTFT (ms)', 0):8.0f}ms  {per_out:15.3f}  {per_total:14.3f}")"""),
+    ("code", '# Cell 5: one T4, fp16.\nproc, ready_s = serve(["--max-model-len", "4096"]); print(f"ready after {ready_s} s"); ladder(1); stop(proc)'),
+    ("code", '# Cell 6: two T4s, tensor parallel.\nproc, ready_s = serve(["--max-model-len", "4096", "--tensor-parallel-size", "2"]); print(f"ready after {ready_s} s"); ladder(2); stop(proc)'),
+    ("code", '# Cell 7: two T4s, two copies.\nproc, ready_s = serve(["--max-model-len", "4096", "--data-parallel-size", "2"]); print(f"ready after {ready_s} s"); ladder(2); stop(proc)'),
+]
+
 
 def write(path, cells):
     nb = {"cells": [{"cell_type": t, "metadata": {}, "source": src.splitlines(keepends=True), **({"outputs": [], "execution_count": None} if t == "code" else {})} for t, src in cells],
@@ -586,4 +688,7 @@ if __name__ == "__main__":
     write("labs/14-cold-start-and-metrics/kaggle/lab.ipynb", LAB14)
     write("labs/15-two-engines/kaggle/lab.ipynb", LAB15)
     write("labs/16-two-gpus/kaggle/lab.ipynb", LAB16)
-    print("wrote 17 notebooks")
+    write("labs/capstone-a-tune-to-an-slo/kaggle/lab.ipynb", CAP_A)
+    write("labs/capstone-b-engineer-the-cache/kaggle/lab.ipynb", CAP_B)
+    write("labs/capstone-c-cost-per-million-tokens/kaggle/lab.ipynb", CAP_C)
+    print("wrote 20 notebooks")
