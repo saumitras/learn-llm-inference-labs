@@ -649,7 +649,7 @@ stop(proc); stop(proc2)"""),
 ]
 
 CAP_C = [
-    ("markdown", "# Capstone C: cost per million tokens\n\nEach configuration driven from one request at a time up to 128 at once, and the price of a million output tokens at every point from the GPU's hourly rate. On Kaggle the T4 is free, so the notebook prices it as if rented: about $0.35 an hour is a typical cloud T4 rate. The FP8 rows on the capstone page are L4-only."),
+    ("markdown", "# Capstone C: cost per million tokens\n\nEach configuration driven from one request at a time up to 128 at once, and the price of a million output tokens at every point from the GPU's hourly rate. On Kaggle the T4 is free, so the notebook prices it as if rented, at 35 cents an hour, a typical cloud T4 rate. The FP8 rows on the capstone page are L4-only."),
     ("code", CHECK), ("code", INSTALL), ("code", HELPERS),
     ("code", "# Cell 4: the benchmark call and the ladder.\n" + BENCH_QUIET + r"""
 PRICE_PER_GPU_HOUR = 0.35
