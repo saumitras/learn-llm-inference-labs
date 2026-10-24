@@ -252,9 +252,9 @@ def one(i):
 ths = [threading.Thread(target=one, args=(i,)) for i in range(48)]
 for t in ths: t.start()
 print("second  running  waiting  kv%   preemptions")
-for s in range(1, 41):
+for s in range(1, 181):   # the T4 admits these prompts slowly, so watch for three minutes and print every fifth second
     time.sleep(1); m = metrics(NAMES)
-    print(f"{s:>6}  {int(m.get(NAMES[0], 0)):>7}  {int(m.get(NAMES[1], 0)):>7}  {100 * m.get(NAMES[2], 0):4.0f}  {int(m.get(NAMES[3], 0)):>11}")
+    if s % 5 == 0: print(f"{s:>6}  {int(m.get(NAMES[0], 0)):>7}  {int(m.get(NAMES[1], 0)):>7}  {100 * m.get(NAMES[2], 0):4.0f}  {int(m.get(NAMES[3], 0)):>11}")
 for t in ths: t.join()
 print(f"worst gap between two tokens in any stream: {max(g for _, g in done) * 1000:.0f} ms")
 stop(proc)"""),
