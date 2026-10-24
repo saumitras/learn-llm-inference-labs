@@ -329,11 +329,16 @@ LAB08 = [
     ("markdown", "# Lab 08: FP8 weights\n\nThe official FP8 checkpoint on the same rate sweep as the BF16 one. **On the Kaggle T4 this lab is read-only for the FP8 half**: the T4 has no FP8 arithmetic and the engine refuses the checkpoint. The notebook shows the refusal, then runs the fp16 half of the sweep so you have your own baseline against the L4 numbers on the lab page."),
     ("code", CHECK), ("code", INSTALL), ("code", HELPERS),
     ("code", "# Cell 4: the benchmark call.\n" + BENCH_QUIET),
-    ("code", r"""# Cell 5: ask the T4 to serve the FP8 checkpoint, and read why it will not.
+    ("code", r"""# Cell 5: ask the T4 to serve the FP8 checkpoint. If the engine accepts it, run the sweep on it; if not, read why.
 FP8 = "Qwen/Qwen3-4B-Instruct-2507-FP8"
 MODEL_SAVED = MODEL; MODEL = FP8
 try:
-    proc, ready_s = serve(["--max-model-len", "4096"]); print(f"ready after {ready_s} s (this GPU accepted FP8)"); stop(proc)
+    proc, ready_s = serve(["--max-model-len", "4096"]); print(f"ready after {ready_s} s (this GPU accepted the FP8 checkpoint: the engine unpacks the weights to fp16 for the arithmetic)")
+    print("  " + log_lines("/kaggle/working/serve.log", {"q": r"quantization=[a-z0-9_]+"}).get("q", ""))
+    print(row("FP8: 1 at a time, 1,024 in", bench_quiet(rate="inf", num_prompts=16, input_len=1024, max_concurrency=1)))
+    for rate in (1, 2, 4):
+        print(row(f"FP8: {rate} req/s, 512 in", bench_quiet(rate=rate, num_prompts=40, input_len=512)))
+    stop(proc)
 except RuntimeError as e:
     text = open("/kaggle/working/serve.log").read()
     for line in text.splitlines():
