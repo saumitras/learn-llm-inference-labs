@@ -663,7 +663,7 @@ def ladder(gpus):
 
 
 def write(path, cells):
-    nb = {"cells": [{"cell_type": t, "metadata": {}, "source": src.splitlines(keepends=True), **({"outputs": [], "execution_count": None} if t == "code" else {})} for t, src in cells],
+    nb = {"cells": [{"cell_type": t, "id": f"cell-{i}", "metadata": {}, "source": src.splitlines(keepends=True), **({"outputs": [], "execution_count": None} if t == "code" else {})} for i, (t, src) in enumerate(cells)],
           "metadata": {"kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"}, "language_info": {"name": "python"}, "kaggle": {"accelerator": "nvidiaTeslaT4", "isInternetEnabled": True}},
           "nbformat": 4, "nbformat_minor": 5}
     with open(path, "w") as f:
