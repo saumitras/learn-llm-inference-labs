@@ -531,23 +531,33 @@ stop(proc)"""),
 ]
 
 LAB15 = [
-    ("markdown", "# Lab 15: two engines, same traffic\n\nvLLM and SGLang one after the other on random and shared-prefix traffic, with the same load generator so the client is identical. SGLang is installed into the same environment after the vLLM half; if its install conflicts with the engine already installed, the second half will say so."),
-    ("code", CHECK), ("code", INSTALL), ("code", HELPERS), ("code", STREAM), ("code", "# Cell 5: the load generator.\n" + LOAD),
-    ("code", r"""# Cell 6: vLLM.
+    ("markdown", "# Lab 15: two engines, same traffic\n\nvLLM and SGLang one after the other on random and shared-prefix traffic, with the same load generator so the client is identical. SGLang goes into its own Python 3.12 environment beside Kaggle's Python 3.13, because one of its pinned dependencies has no Python 3.13 wheel and it pins a different torch from vLLM. The SGLang cell does not need the vLLM cells, so you can run cells 1, 3, 4, 5 and 7 alone."),
+    ("code", CHECK), ("code", INSTALL), ("code", HELPERS), ("code", STREAM),
+    ("code", "# Cell 5: the load generator and the traffic both engines get.\n" + LOAD + r"""
 def traffic(engine):
     for label, prefix in (("random prompts", 0), ("75% shared prefix", 768)):
-        print("  " + load_row(f"{engine}: {label}", load_test(rate=2, num_prompts=32, prompt_len=1024, out_len=128, prefix_len=prefix)))
+        print("  " + load_row(f"{engine}: {label}", load_test(rate=2, num_prompts=32, prompt_len=1024, out_len=128, prefix_len=prefix)))"""),
+    ("code", r"""# Cell 6: vLLM.
 proc, ready_s = serve(["--max-model-len", "4096"]); print(f"vLLM ready after {ready_s} s"); traffic("vLLM"); stop(proc)"""),
-    ("code", r"""# Cell 7: SGLang.
-import subprocess, sys
-subprocess.run([sys.executable, "-m", "pip", "install", "-q", "sglang[all]==0.5.22"], check=False)
+    ("code", r"""# Cell 7: SGLang, in its own Python 3.12 environment made by uv (under a minute).
+# The T4 has no prebuilt FlashInfer kernels, so SGLang compiles some at startup with ninja and nvcc: the environment's
+# bin folder goes on PATH, attention uses the Triton backend and sampling uses plain PyTorch. Startup takes about six minutes.
+import os, subprocess, sys
+t0 = time.time()
+r = subprocess.run("pip install -q uv && uv venv /tmp/sglang --python 3.12 -q && uv pip install --python /tmp/sglang/bin/python -q 'sglang[all]==0.5.22'", shell=True, capture_output=True, text=True)
+print(f"SGLang installed in {time.time() - t0:.0f} s" if r.returncode == 0 else "install failed:\n" + (r.stdout + r.stderr)[-2000:])
+env = {**os.environ, "PATH": "/tmp/sglang/bin:" + os.environ["PATH"]}
 log = open("/kaggle/working/sglang.log", "w"); t0 = time.time()
-proc = subprocess.Popen([sys.executable, "-m", "sglang.launch_server", "--model-path", MODEL, "--port", "8000", "--context-length", "4096", "--dtype", "half"], stdout=log, stderr=subprocess.STDOUT)
-while time.time() - t0 < 900 and proc.poll() is None:
+proc = subprocess.Popen(["/tmp/sglang/bin/python", "-m", "sglang.launch_server", "--model-path", MODEL, "--port", "8000", "--context-length", "4096", "--dtype", "half",
+                         "--attention-backend", "triton", "--sampling-backend", "pytorch"], stdout=log, stderr=subprocess.STDOUT, env=env)
+while time.time() - t0 < 1500 and proc.poll() is None:
     try: urllib.request.urlopen(URL + "/health", timeout=2); break
     except Exception: time.sleep(0.5)
 if proc.poll() is not None: print("SGLang did not start; last lines:\n" + "\n".join(open("/kaggle/working/sglang.log").read().splitlines()[-15:]))
-else: print(f"SGLang ready after {time.time() - t0:.0f} s"); traffic("SGLang"); proc.terminate(); proc.wait()"""),
+else:
+    print(f"SGLang ready after {time.time() - t0:.0f} s")
+    print("  " + (re.findall(r"Engine startup timings[^\n]*", open("/kaggle/working/sglang.log").read()) or [""])[0])
+    traffic("SGLang"); proc.terminate(); proc.wait()"""),
 ]
 
 LAB16 = [
