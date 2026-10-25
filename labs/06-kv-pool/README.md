@@ -39,7 +39,7 @@ The scheduler admits requests as blocks allow: about 25 fit, 23 wait. As the 25 
 100 percent, and at second 27 a running request is paused and its blocks given away: the first preemption. The
 worst gap in any stream is 43 seconds, a request that waited for the shelf.
 
-## Expected output, Kaggle T4 ×2 (captured 24 October 2026, vLLM 0.32.0, `--dtype half`)
+## Expected output, Kaggle T4 ×2 (captured 24 and 25 October 2026, vLLM 0.32.0, `--dtype half`)
 
 ```
 1. Start with no length limit
@@ -48,22 +48,31 @@ is needed, which is larger than the available KV cache memory (4.37 GiB). Based 
 estimated maximum model length is 31840.
 
 2. Start with --max-model-len 4096: the shelf
+ready after 221.3 s
   Available KV cache memory: 4.74 GiB
   GPU KV cache size: 34,496 tokens, Maximum concurrency for 4,096 tokens per request: 8.42x
 
-3. Overfill it: 48 requests of ~3,000 prompt tokens plus 600 output (first 40 seconds)
+3. Overfill it: 48 requests of ~3,000 prompt tokens plus 600 output (every fifth second for three minutes; selected rows)
 second  running  waiting  kv%   preemptions
-     4        2       46    12            0
-    11        3       45    24            0
+     5        2       46    12            0
     20        5       43    42            0
-    30        6       42    60            0
     40        8       40    77            0
-worst gap between two tokens in any stream: 103466 ms
+    50       10       38    95            0
+    55       10       38   100            0
+    60        9       39    91            1
+    90        9       39    96            1
+   115        9       39   100            1
+   120        8       40    90            2
+   150        7       39    81            2
+   180        7       33    69            2
+worst gap between two tokens in any stream: 101627 ms
 ```
 
-The refusal names 31,840 as the longest request this GPU could serve, against 86,080 on the L4, and the shelf is
-34,496 tokens, eight of these requests. The overfill looks different on the T4: the prompts are admitted two or
-three at a time because the T4 prefills them slowly, so after forty seconds eight are running, forty wait, the
-shelf is at 77 percent and nothing has been preempted yet. The preemptions come later, outside this capture's
-window; the notebook now watches for three minutes. Several client streams hit their ten-minute timeout, which
-is the queue the table shows.
+The refusal and the shelf were captured on 24 October and the three-minute watch on 25 October. The refusal names
+31,840 as the longest request this GPU could serve, against 86,080 on the L4, and the shelf is 34,496 tokens, about
+nine of these requests once they have grown. The T4 prefills a 3,000-token prompt slowly, so requests are admitted
+two or three at a time. At 55 seconds ten are running and the shelf is full. Five seconds later the engine preempts
+one: running drops to nine, waiting rises by one and the shelf falls to 91 percent. The same happens again at 120
+seconds. The worst gap in any stream, 101.6 seconds, is a preempted request waiting to be readmitted and to
+recompute its cache. The streams still queued when the client's timeout ran out end in timeout errors, which is the
+same queue seen from the client.
