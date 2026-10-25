@@ -541,12 +541,13 @@ def traffic(engine):
 proc, ready_s = serve(["--max-model-len", "4096"]); print(f"vLLM ready after {ready_s} s"); traffic("vLLM"); stop(proc)"""),
     ("code", r"""# Cell 7: SGLang, in its own Python 3.12 environment made by uv (under a minute).
 # The T4 has no prebuilt FlashInfer kernels, so SGLang compiles some at startup with ninja and nvcc: the environment's
-# bin folder goes on PATH, attention uses the Triton backend and sampling uses plain PyTorch. Startup takes about six minutes.
+# bin folder goes on PATH, the linker is pointed at Kaggle's libcuda.so (on the loader path but not the linker's),
+# attention uses the Triton backend and sampling uses plain PyTorch. Startup takes about six minutes.
 import os, subprocess, sys
 t0 = time.time()
-r = subprocess.run("pip install -q uv && uv venv /tmp/sglang --python 3.12 -q && uv pip install --python /tmp/sglang/bin/python -q 'sglang[all]==0.5.22'", shell=True, capture_output=True, text=True)
+r = subprocess.run("pip install -q uv && uv venv /tmp/sglang --python 3.12 --clear -q && uv pip install --python /tmp/sglang/bin/python -q 'sglang[all]==0.5.22'", shell=True, capture_output=True, text=True)
 print(f"SGLang installed in {time.time() - t0:.0f} s" if r.returncode == 0 else "install failed:\n" + (r.stdout + r.stderr)[-2000:])
-env = {**os.environ, "PATH": "/tmp/sglang/bin:" + os.environ["PATH"]}
+env = {**os.environ, "PATH": "/tmp/sglang/bin:" + os.environ["PATH"], "LIBRARY_PATH": ":".join(filter(None, ["/usr/local/nvidia/lib64", os.environ.get("LD_LIBRARY_PATH"), os.environ.get("LIBRARY_PATH")]))}
 log = open("/kaggle/working/sglang.log", "w"); t0 = time.time()
 proc = subprocess.Popen(["/tmp/sglang/bin/python", "-m", "sglang.launch_server", "--model-path", MODEL, "--port", "8000", "--context-length", "4096", "--dtype", "half",
                          "--attention-backend", "triton", "--sampling-backend", "pytorch"], stdout=log, stderr=subprocess.STDOUT, env=env)
