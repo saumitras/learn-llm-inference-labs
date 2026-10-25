@@ -51,3 +51,26 @@ A million output tokens costs $7.68 from a GPU serving one request at a time and
 with FP8 weights, an FP8 cache and 128 requests in flight. The first two configurations got slower at 128 than at
 64: 128 requests of 1,280 tokens need 164,000 cache tokens, more than their shelves hold, so requests were
 preempted and re-prefilled. The total-token price is the output price times 256/1,280.
+
+## Expected output, Kaggle T4 ×2 (captured 25 October 2026, vLLM 0.32.0, fp16, priced at $0.35 per T4-hour)
+
+```
+One T4                                     ready after 215.3 s
+   concurrency  out tok/s  TPOT p50  TTFT p99  $ per 1M output tokens  $ per 1M total tokens
+             1       19.8    47.1ms    1548ms                   4.915                  0.983
+             8       96.9    78.0ms    2194ms                   1.003                  0.201
+            32      107.6   207.3ms   62029ms                   0.904                  0.181
+            64      108.6   227.5ms  135697ms                   0.895                  0.179
+
+Two T4s, tensor parallel ($0.70/h)         ready after 159.7 s
+             1       38.1    23.7ms    1359ms                   5.100                  1.020
+             8      155.2    41.3ms    2890ms                   1.253                  0.251
+            32      213.0   125.9ms   12481ms                   0.913                  0.183
+            64      284.9   178.4ms   27211ms                   0.683                  0.137
+```
+
+The two-copy ladder was not captured on the T4 pair in this pass (the Modal column has it; Lab 16 has the T4
+pair's data-parallel rows). A T4 is cheap and slow: a million output tokens costs $4.92 one at a time and about
+90 cents once the GPU is saturated at 32 in flight, where it stops gaining. The split pair reaches 68 cents at 64
+in flight, cheaper than one T4 at the same price per hour of compute, because the pooled shelf keeps 64 requests
+resident where one T4 preempts them.
