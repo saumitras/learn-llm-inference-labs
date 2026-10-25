@@ -56,3 +56,31 @@ Quality gate: lm_eval HellaSwag, 100 examples
 Each row is 72 requests. Above about 4 offered requests a second all 72 are in flight at once (peak conc 72), so
 the achieved rate is the GPU's throughput at that configuration, and the rate column stops meaning arrivals and
 starts meaning capacity. That is the number the fleet is sized from.
+
+## Expected output, Kaggle T4 ×2 (captured 25 October 2026, vLLM 0.32.0, fp16; the FP8 configurations are not run on this GPU)
+
+```
+Target: TTFT p99 <= 1000 ms and TPOT p99 <= 75 ms, prompts 1300 tokens (600 shared), answers 300 tokens, 8.3 req/s needed
+
+fp16, defaults                         ready after 222.3 s
+  MISS 1 req/s    req/s 0.31  out tok/s  91.9  TTFT p50  3267 p99  73274 ms  TPOT p50 323.3 p99 361.7 ms
+  MISS 2 req/s    req/s 0.32  out tok/s  95.4  TTFT p50  7410 p99  94043 ms  TPOT p50 335.5 p99 378.8 ms
+  MISS 4 req/s    req/s 0.32  out tok/s  95.8  TTFT p50 12913 p99 105470 ms  TPOT p50 329.3 p99 381.0 ms
+  MISS 8 req/s    req/s 0.32  out tok/s  95.7  TTFT p50 16564 p99 111319 ms  TPOT p50 327.1 p99 380.6 ms
+  highest rate inside the target: 0.00 req/s  ->  GPUs for 8.3 req/s: inf
+
+fp16, max-num-seqs 16                  ready after 120.1 s
+  MISS 1 req/s    req/s 0.30  out tok/s  90.8  TTFT p50 36082 p99  73402 ms  TPOT p50 157.1 p99 174.2 ms
+  MISS 2 req/s    req/s 0.31  out tok/s  94.4  TTFT p50 44645 p99  90685 ms  TPOT p50 159.1 p99 166.2 ms
+  MISS 8 req/s    req/s 0.32  out tok/s  94.9  TTFT p50 55490 p99 107785 ms  TPOT p50 153.6 p99 166.0 ms
+  highest rate inside the target: 0.00 req/s  ->  GPUs for 8.3 req/s: inf
+
+Quality gate: lm_eval HellaSwag, 100 examples
+  fp16 acc_norm 0.58
+```
+
+On the T4 the support bot's targets are out of reach at every rate tried: 48 of these 1,300-token prompts are
+all in flight within seconds, the step is 330 ms, and the first token is a queue of a minute or more. Capping the
+batch at 16 brings the step to 157 ms and moves the whole wait to the queue. The sweep returns no passing rate,
+so the fleet size is undefined rather than large: this GPU cannot serve this bot inside these targets at any
+count. The quality gate matches the L4's 0.58.
