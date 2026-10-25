@@ -67,10 +67,17 @@ Two T4s, tensor parallel ($0.70/h)         ready after 159.7 s
              8      155.2    41.3ms    2890ms                   1.253                  0.251
             32      213.0   125.9ms   12481ms                   0.913                  0.183
             64      284.9   178.4ms   27211ms                   0.683                  0.137
+
+Two T4s, two copies ($0.70/h)             ready after 265.4 s   (second session, same day)
+             1       19.9    44.3ms    1767ms                   9.776                  1.955
+             8      100.4    61.0ms    4826ms                   1.936                  0.387
+            32      203.9   132.6ms   10933ms                   0.954                  0.191
+            64      203.3   229.4ms   70483ms                   0.957                  0.191
 ```
 
-The two-copy ladder was not captured on the T4 pair in this pass (the Modal column has it; Lab 16 has the T4
-pair's data-parallel rows). A T4 is cheap and slow: a million output tokens costs $4.92 one at a time and about
-90 cents once the GPU is saturated at 32 in flight, where it stops gaining. The split pair reaches 68 cents at 64
-in flight, cheaper than one T4 at the same price per hour of compute, because the pooled shelf keeps 64 requests
-resident where one T4 preempts them.
+A T4 is cheap and slow: a million output tokens costs $4.92 one at a time and about 90 cents once the GPU is
+saturated at 32 in flight, where it stops gaining. Two copies are two of those T4s: double the price while one
+request leaves a GPU idle, then 95 cents, because each copy tops out at one T4's hundred tokens a second and keeps
+one T4's 31,856-token shelf. The split pair reaches 68 cents at 64 in flight because splitting the weights frees
+memory on both GPUs: its pooled shelf of 126,464 tokens is twice what the two copies hold between them, so all 64
+requests stay resident while the copies make some of theirs wait.
