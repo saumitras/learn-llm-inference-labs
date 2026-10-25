@@ -4,7 +4,7 @@ The official FP8 checkpoint against the BF16 one: start time, shelf size, the ba
 on both.
 
 - Modal: `modal run labs/08-fp8-weights/modal/lab.py`
-- Kaggle: `kaggle/lab.ipynb` (the T4 has no FP8 arithmetic: the notebook shows the refusal and runs the fp16 half)
+- Kaggle: `kaggle/lab.ipynb` (the T4 accepts the FP8 checkpoint and unpacks the weights to fp16; both halves run)
 
 ## Expected output, Modal L4 (captured 24 October 2026, vLLM 0.32.0)
 
@@ -32,3 +32,26 @@ ready after 162.4 s
 Each sweep row is 60 prompts of 512 tokens with 128-token answers. The FP8 weights are 5.19 GB against 8.04, the
 batch-1 step is 19.6 ms against 33.6, and the shelf grew from 86,096 to 105,920 tokens because the weights left
 2.85 GB free.
+
+## Expected output, Kaggle T4 ×2 (captured 25 October 2026, vLLM 0.32.0; 40 prompts per sweep row)
+
+```
+FP8: Qwen/Qwen3-4B-Instruct-2507-FP8     ready after 225.3 s (this GPU accepted the FP8 checkpoint)
+  quantization=fp8
+FP8: 1 at a time, 1,024 in   req/s 0.25  out tok/s  31.7  TTFT p50 815 p99 1618 ms  TPOT p50  25.1 p99  25.6 ms
+FP8: 1 req/s, 512 in         req/s 0.87  out tok/s 112.0  TTFT p50 421 p99 2741 ms  TPOT p50  54.1 p99  94.3 ms
+FP8: 2 req/s, 512 in         req/s 1.58  out tok/s 202.2  TTFT p50 129 p99  190 ms  TPOT p50  45.8 p99  54.6 ms
+FP8: 4 req/s, 512 in         req/s 1.98  out tok/s 253.0  TTFT p50 202 p99 2028 ms  TPOT p50  89.0 p99 103.7 ms
+
+fp16: Qwen/Qwen3-4B-Instruct-2507        ready after 185.2 s
+1 at a time, 1,024 in        req/s 0.16  out tok/s  20.7  TTFT p50 749 p99 1555 ms  TPOT p50  41.8 p99  45.1 ms
+1 req/s, 512 in              req/s 0.83  out tok/s 106.2  TTFT p50 482 p99 2083 ms  TPOT p50  91.5 p99 110.5 ms
+2 req/s, 512 in              req/s 1.31  out tok/s 167.1  TTFT p50 212 p99 2084 ms  TPOT p50  92.1 p99 108.1 ms
+4 req/s, 512 in              req/s 1.71  out tok/s 218.7  TTFT p50 238 p99  380 ms  TPOT p50 111.8 p99 116.8 ms
+```
+
+The T4 has no FP8 arithmetic, and the engine serves the checkpoint anyway: it unpacks the 8-bit weights to fp16
+inside each multiply, so the GPU still reads half the bytes per step. The batch-1 step went from 41.8 to 25.1 ms,
+60 percent, the same ratio as on the L4, and at four requests a second the FP8 server produced 253 tokens a second
+against 219. The first token did not improve, as on the L4, because prefill is arithmetic and the unpacking is
+extra arithmetic.

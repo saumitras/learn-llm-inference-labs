@@ -54,7 +54,7 @@ on a fresh machine takes about five minutes.
 ```
 Tesla T4, 15360 MiB, 580.178.04
 Tesla T4, 15360 MiB, 580.178.04
-Path: Kaggle T4. Labs 08 and 10 are read-only on this GPU (no FP8 arithmetic).
+Path: Kaggle T4. Labs 08 and 10 are read-only on this GPU (no FP8 arithmetic).   (the check cell's wording at the time; Lab 08 turned out to run)
 vllm 0.32.0 · torch 2.13.0+cu130 · compute capability (7, 5)      (the install cell took about eleven minutes)
 
 ready after 225.3 s

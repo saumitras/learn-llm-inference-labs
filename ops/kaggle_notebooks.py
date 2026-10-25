@@ -10,7 +10,7 @@ if out.returncode != 0 or not out.stdout.strip():
     sys.exit("No GPU. Open Settings → Accelerator and choose GPU T4 x2, then run this cell again.")
 print(out.stdout.strip())
 if "T4" in out.stdout:
-    print("Path: Kaggle T4. Labs 08 and 10 are read-only on this GPU (no FP8 arithmetic).")'''
+    print("Path: Kaggle T4. Lab 10 is read-only on this GPU (no FP8 KV cache); the FP8 checkpoint in Lab 08 runs with unpacked weights.")'''
 
 INSTALL = r'''# Cell 2: install the pinned engine. About nine minutes on Kaggle. Kaggle's preinstalled torchaudio is built
 # for an older CUDA and breaks the import, so it is removed.
@@ -326,7 +326,7 @@ print("load generator ready")"""
 STREAM_MODEL = STREAM.replace('body = json.dumps({"model": MODEL, "messages": messages, "stream": True, **params}).encode()', 'body = json.dumps({"model": params.pop("model", MODEL), "messages": messages, "stream": True, **params}).encode()')
 
 LAB08 = [
-    ("markdown", "# Lab 08: FP8 weights\n\nThe official FP8 checkpoint on the same rate sweep as the BF16 one. **On the Kaggle T4 this lab is read-only for the FP8 half**: the T4 has no FP8 arithmetic and the engine refuses the checkpoint. The notebook shows the refusal, then runs the fp16 half of the sweep so you have your own baseline against the L4 numbers on the lab page."),
+    ("markdown", "# Lab 08: FP8 weights\n\nThe official FP8 checkpoint on the same rate sweep as the fp16 one. The T4 has no FP8 arithmetic, but the engine accepts the checkpoint and unpacks the weights to fp16 on the way through, so the sweep runs on both; the notebook also prints the refusal if a GPU does not accept it."),
     ("code", CHECK), ("code", INSTALL), ("code", HELPERS),
     ("code", "# Cell 4: the benchmark call.\n" + BENCH_QUIET),
     ("code", r"""# Cell 5: ask the T4 to serve the FP8 checkpoint. If the engine accepts it, run the sweep on it; if not, read why.

@@ -29,7 +29,8 @@ most ten GPUs at once; a lab launched past that limit waits for a free one.
 
 Open the lab's notebook with the course page's button, or paste its URL into Kaggle's File → Open notebook. Then
 Settings → Accelerator → GPU T4 ×2, and Run all. The first cell checks the GPU; the second installs vLLM, which takes
-about nine minutes on Kaggle. The two FP8 labs are read-only on this path, because the T4 has no FP8 arithmetic.
+about nine minutes on Kaggle. Lab 10 is read-only on this path, because the T4 cannot hold an FP8 KV cache; the FP8
+checkpoint in Lab 08 runs there with its weights unpacked to fp16.
 
 ## Layout
 
