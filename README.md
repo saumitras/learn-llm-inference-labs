@@ -1,13 +1,12 @@
 # Learn LLM Inference: labs
 
 The hands-on labs for [Learn LLM Inference](https://learnllminference.fignix.com), a free course by fignix on serving
-large language models fast and cheaply. Each lab runs on one of three paths; pick yours on the course's labs page.
+large language models fast and cheaply. Each lab runs on one of two paths; pick yours on the course's labs page.
 
 | Path | GPU | Cost | How a lab runs |
 | --- | --- | --- | --- |
 | Kaggle | 2 × T4 (16 GB each) | free, no card | open the lab's notebook in Kaggle, turn on the GPU, run the cells |
 | Modal | 1 × L4 (24 GB) | pay per second, card on file | `modal run labs/<lab>/modal/lab.py` |
-| AWS | g6.xlarge (L4) | about $0.81 an hour | coming |
 
 Every lab pins vLLM 0.32.0 and uses Qwen/Qwen3-4B-Instruct-2507 unless it says otherwise. The expected output on
 each path is in the lab's README and on the course page; it was captured on the date it names.
